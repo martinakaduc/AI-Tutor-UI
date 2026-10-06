@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Message, MessageFile } from "$lib/types/Message";
+	import type { StudentFeedback, StudentFeedbackUpdate } from "$lib/types/StudentFeedback";
 	import { onDestroy, untrack } from "svelte";
 
 	import ArtifactPanel from "./ArtifactPanel.svelte";
@@ -105,6 +106,8 @@
 
 	interface Props {
 		messages?: Message[];
+		conversationId?: string;
+		studentFeedback?: Record<string, StudentFeedback>;
 		messagesAlternatives?: Message["id"][][];
 		loading?: boolean;
 		pending?: boolean;
@@ -123,6 +126,8 @@
 
 	let {
 		messages = [],
+		conversationId = "",
+		studentFeedback = {},
 		messagesAlternatives = [],
 		loading = false,
 		pending = false,
@@ -138,6 +143,17 @@
 		onretry,
 		onshowAlternateMsg,
 	}: Props = $props();
+
+	// Keep successes through response remounts (for example, switching branches).
+	// Conversation keys also keep a late request completion scoped to its original chat.
+	let feedbackUpdates = $state<Record<string, Record<string, StudentFeedback>>>({});
+	function rememberFeedback(update: StudentFeedbackUpdate) {
+		const conversation = (feedbackUpdates[update.conversationId] ??= {});
+		conversation[update.messageId] = {
+			...conversation[update.messageId],
+			...update.feedback,
+		};
+	}
 
 	let isReadOnly = $derived(!models.some((model) => model.id === currentModel.id));
 
@@ -961,6 +977,13 @@
 									<ChatMessage
 										{loading}
 										{message}
+										{conversationId}
+										feedback={{
+											...studentFeedback[message.id],
+											...feedbackUpdates[conversationId]?.[message.id],
+										}}
+										onfeedback={rememberFeedback}
+										question={turn.messages.find((m) => m.from === "user")?.content ?? ""}
 										alternatives={messagesAlternatives.find((a) => a.includes(message.id)) ?? []}
 										isAuthor={!shared}
 										readOnly={isReadOnly}

@@ -3,9 +3,21 @@ import { render } from "vitest-browser-svelte";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { tick } from "svelte";
 import { MessageUpdateType } from "$lib/types/MessageUpdate";
+import { renderWithApp } from "../__tests__/renderWithApp";
+import { error as chatError } from "$lib/stores/errors";
+import { get } from "svelte/store";
 
-beforeEach(() => vi.stubGlobal("fetch", async () => new Response("{}", { status: 200 })));
-afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => {
+	vi.stubGlobal("fetch", async () => new Response("{}", { status: 200 }));
+	vi.stubGlobal(
+		"confirm",
+		vi.fn(() => true)
+	);
+});
+afterEach(() => {
+	vi.unstubAllGlobals();
+	chatError.set(undefined);
+});
 
 const call = (uuid: string) => ({
 	type: "tool",
@@ -68,6 +80,202 @@ const mount = (updates: unknown[], content = "") =>
 	} as never);
 
 const spinners = (el: HTMLElement) => el.querySelectorAll(".loading").length;
+
+describe("student feedback actions", () => {
+	const completed = (extra = {}) =>
+		renderWithApp(ChatMessage, {
+			message: { id: "feedback-m1", from: "assistant", content: "[Admin] A reply.", children: [] },
+			question: "Question from this turn",
+			conversationId: "507f1f77bcf86cd799439011",
+			loading: false,
+			isLast: true,
+			...extra,
+		});
+
+	const button = (container: HTMLElement, label: string) =>
+		container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+
+	it.each(["Report hallucination", "Contact TA"])(
+		"sends no request when the student cancels %s",
+		async (label) => {
+			const confirm = vi.fn(() => false);
+			const fetch = vi.fn();
+			vi.stubGlobal("confirm", confirm);
+			vi.stubGlobal("fetch", fetch);
+			const { container } = completed();
+			const action = button(container, label);
+			action.click();
+			await tick();
+			expect(confirm).toHaveBeenCalledTimes(1);
+			expect(fetch).not.toHaveBeenCalled();
+			expect(action.disabled).toBe(false);
+			expect(action.textContent?.trim()).toBe(label);
+			expect(get(chatError)).toBeUndefined();
+		}
+	);
+
+	it("places Report hallucination and Contact TA before Copy and Retry", async () => {
+		const { container } = completed();
+		const labels = Array.from(container.querySelectorAll("button")).map(
+			(b) => b.getAttribute("aria-label") ?? b.title
+		);
+		expect(labels.indexOf("Report hallucination")).toBeLessThan(labels.indexOf("Contact TA"));
+		expect(labels.indexOf("Contact TA")).toBeLessThan(labels.indexOf("Copy to clipboard"));
+		expect(labels.indexOf("Copy to clipboard")).toBeLessThan(labels.indexOf("Retry"));
+		await tick();
+		const report = button(container, "Report hallucination").getBoundingClientRect();
+		const contact = button(container, "Contact TA").getBoundingClientRect();
+		const copy = container
+			.querySelector<HTMLButtonElement>('button[title="Copy to clipboard"]')!
+			.getBoundingClientRect();
+		expect(report.right).toBeLessThanOrEqual(contact.left);
+		expect(contact.right).toBeLessThanOrEqual(copy.left);
+	});
+
+	it("keeps the controls inside a narrow chat column for short answers", async () => {
+		const { container } = completed();
+		container.style.width = "320px";
+		container.style.containerType = "inline-size";
+		await vi.waitFor(() => {
+			const bounds = container.getBoundingClientRect();
+			const report = button(container, "Report hallucination").getBoundingClientRect();
+			const retry = container
+				.querySelector<HTMLButtonElement>('button[title="Retry"]')!
+				.getBoundingClientRect();
+			expect(report.left).toBeGreaterThanOrEqual(bounds.left);
+			expect(retry.right).toBeLessThanOrEqual(bounds.right);
+		});
+	});
+
+	it("reports the response's question and blocks duplicate clicks", async () => {
+		let resolve!: (response: Response) => void;
+		const fetch = vi.fn<typeof globalThis.fetch>(
+			() =>
+				new Promise((r) => {
+					resolve = r;
+				})
+		);
+		vi.stubGlobal("fetch", fetch);
+		const { container } = completed();
+		const report = button(container, "Report hallucination");
+		report.click();
+		report.click();
+		await tick();
+		expect(window.confirm).toHaveBeenCalledOnce();
+		expect(window.confirm).toHaveBeenCalledWith(
+			"Report this response as hallucinated? Your question and this response will be sent to the TA for review."
+		);
+		expect(fetch).toHaveBeenCalledTimes(1);
+		expect(fetch.mock.calls[0][0]).toBe("/api/report-hallucination");
+		expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({
+			question: "Question from this turn",
+			answer: "[Admin] A reply.",
+			conversationId: "507f1f77bcf86cd799439011",
+			messageId: "feedback-m1",
+		});
+		expect(report.disabled).toBe(true);
+		resolve(Response.json({ status: "ok", entry_id: 1 }));
+		await vi.waitFor(() => expect(report.textContent).toContain("Reported"));
+		expect(report.disabled).toBe(true);
+	});
+
+	it("shows the Canvas post link after Contact TA succeeds", async () => {
+		const url = "https://canvas.example/courses/97040/discussion_topics/42";
+		const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+			Response.json({ status: "success", url })
+		);
+		vi.stubGlobal("fetch", fetch);
+		const { container } = completed();
+		button(container, "Contact TA").click();
+		await vi.waitFor(() => expect(container.querySelector(`a[href="${url}"]`)).toBeTruthy());
+		expect(window.confirm).toHaveBeenCalledWith(
+			"Contact a TA? Your question will be posted to the course forum on Canvas."
+		);
+		expect(JSON.parse(String(fetch.mock.calls[0][1]?.body)).question).toBe(
+			"Question from this turn"
+		);
+		expect(button(container, "Contact TA").disabled).toBe(true);
+	});
+
+	it("restores saved statuses and the Canvas post link when mounted again", () => {
+		const fetch = vi.fn();
+		vi.stubGlobal("fetch", fetch);
+		const url = "https://canvas.example/courses/97040/discussion_topics/42";
+		const { container } = completed({
+			feedback: { hallucinationReported: true, canvasPosted: true, canvasUrl: url },
+		});
+		const report = button(container, "Report hallucination");
+		const contact = button(container, "Contact TA");
+		expect(report.textContent?.trim()).toBe("Reported");
+		expect(contact.textContent?.trim()).toBe("Posted to Canvas");
+		expect(report.disabled).toBe(true);
+		expect(contact.disabled).toBe(true);
+		expect(container.querySelector(`a[href="${url}"]`)?.textContent?.trim()).toBe("View post");
+		report.click();
+		contact.click();
+		expect(window.confirm).not.toHaveBeenCalled();
+		expect(fetch).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		{
+			feedback: { hallucinationReported: true },
+			disabled: "Report hallucination",
+			enabled: "Contact TA",
+		},
+		{ feedback: { canvasPosted: true }, disabled: "Contact TA", enabled: "Report hallucination" },
+	])("keeps the two saved statuses independent: $disabled", ({ feedback, disabled, enabled }) => {
+		const { container } = completed({ feedback });
+		expect(button(container, disabled).disabled).toBe(true);
+		expect(button(container, enabled).disabled).toBe(false);
+	});
+
+	it("does not carry a completed action into another response", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => Response.json({ status: "ok" }))
+		);
+		const onfeedback = vi.fn();
+		const screen = completed({ onfeedback });
+		button(screen.container, "Report hallucination").click();
+		await vi.waitFor(() =>
+			expect(onfeedback).toHaveBeenCalledWith({
+				conversationId: "507f1f77bcf86cd799439011",
+				messageId: "feedback-m1",
+				feedback: { hallucinationReported: true },
+			})
+		);
+		expect(button(screen.container, "Report hallucination").disabled).toBe(true);
+		await screen.rerender({
+			message: { id: "feedback-m2", from: "assistant", content: "Another reply." },
+		});
+		expect(button(screen.container, "Report hallucination").disabled).toBe(false);
+	});
+
+	it("shows backend failures and lets the student try again", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => Response.json({ error: "Canvas refused the request." }, { status: 502 }))
+		);
+		const { container } = completed();
+		button(container, "Contact TA").click();
+		await vi.waitFor(() => expect(get(chatError)).toBe("Canvas refused the request."));
+		expect(button(container, "Contact TA").disabled).toBe(false);
+		expect(container.textContent).not.toContain("Posted to Canvas");
+	});
+
+	it("disables feedback when the question is unavailable", () => {
+		const { container } = completed({ question: "" });
+		expect(button(container, "Report hallucination").disabled).toBe(true);
+		expect(button(container, "Contact TA").disabled).toBe(true);
+	});
+
+	it("hides feedback in shared conversations", () => {
+		const { container } = completed({ isAuthor: false });
+		expect(button(container, "Report hallucination")).toBeNull();
+		expect(button(container, "Contact TA")).toBeNull();
+	});
+});
 
 describe("a run still working with nothing streaming", () => {
 	// One mount per test: they share a document, so a second would count the first's.

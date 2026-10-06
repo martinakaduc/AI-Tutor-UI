@@ -4,6 +4,7 @@ import type { PlanState } from "./Plan";
 import type { Timestamps } from "./Timestamps";
 import type { User } from "./User";
 import type { Assistant } from "./Assistant";
+import type { StudentFeedback } from "./StudentFeedback";
 
 export interface Conversation extends Timestamps {
 	_id: ObjectId;
@@ -16,6 +17,9 @@ export interface Conversation extends Timestamps {
 	title: string;
 	rootMessageId?: Message["id"];
 	messages: Message[];
+
+	/** Keyed by response id; targeted writes keep message saves from clearing these statuses. */
+	studentFeedback?: Record<string, StudentFeedback>;
 
 	meta?: {
 		fromShareId?: string;

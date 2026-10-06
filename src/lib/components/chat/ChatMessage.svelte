@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Message } from "$lib/types/Message";
+	import type { StudentFeedback, StudentFeedbackUpdate } from "$lib/types/StudentFeedback";
 	import { tick } from "svelte";
 
 	import { usePublicConfig } from "$lib/utils/PublicConfig.svelte";
@@ -32,6 +33,7 @@
 	import { isMessageToolResultUpdate, isMessageToolErrorUpdate } from "$lib/utils/messageUpdates";
 	import type { MessageHarnessEventUpdate, MessagePlanUpdate } from "$lib/types/MessageUpdate";
 	import { page } from "$app/state";
+	import { base } from "$app/paths";
 	import ImageLightbox from "./ImageLightbox.svelte";
 	import { stripArtifacts } from "$lib/utils/artifacts";
 	import type { ArtifactOperation } from "$lib/utils/artifacts";
@@ -42,9 +44,14 @@
 		type MessageBlock,
 	} from "$lib/utils/messageBlocks";
 	import { rebuildLegacyContent } from "$lib/utils/messageShape";
+	import { error as chatError } from "$lib/stores/errors";
 
 	interface Props {
 		message: Message;
+		question?: string;
+		conversationId?: string;
+		feedback?: StudentFeedback;
+		onfeedback?: (update: StudentFeedbackUpdate) => void;
 		loading?: boolean;
 		isAuthor?: boolean;
 		readOnly?: boolean;
@@ -58,6 +65,10 @@
 
 	let {
 		message,
+		question = "",
+		conversationId = "",
+		feedback,
+		onfeedback,
 		loading = false,
 		isAuthor = true,
 		readOnly = false,
@@ -76,6 +87,105 @@
 	let messageWidth: number = $state(0);
 	let messageInfoWidth: number = $state(0);
 	let lightboxSrc: string | null = $state(null);
+	let reporting = $state(false);
+	let contacting = $state(false);
+	let submittedFeedback = $state<StudentFeedbackUpdate>();
+	let savedFeedback = $derived({
+		...feedback,
+		...(submittedFeedback?.conversationId === conversationId &&
+		submittedFeedback.messageId === message.id
+			? submittedFeedback.feedback
+			: {}),
+	});
+	let reported = $derived(savedFeedback.hallucinationReported === true);
+	let contacted = $derived(savedFeedback.canvasPosted === true);
+	let canvasUrl = $derived(
+		savedFeedback.canvasUrl && /^https?:\/\//i.test(savedFeedback.canvasUrl)
+			? savedFeedback.canvasUrl
+			: undefined
+	);
+	let feedbackStatus = $state("");
+
+	async function submitFeedback(action: "report-hallucination" | "contact-ta") {
+		if (!conversationId || !question.trim() || !isAuthor || readOnly) return;
+		const requestConversationId = conversationId;
+		const requestMessageId = message.id;
+		if (action === "report-hallucination") {
+			if (reporting || reported) return;
+			if (
+				!window.confirm(
+					"Report this response as hallucinated? Your question and this response will be sent to the TA for review."
+				)
+			)
+				return;
+			reporting = true;
+		} else {
+			if (contacting || contacted) return;
+			if (
+				!window.confirm("Contact a TA? Your question will be posted to the course forum on Canvas.")
+			)
+				return;
+			contacting = true;
+		}
+		chatError.set(undefined);
+		try {
+			const res = await fetch(`${base}/api/${action}`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Accept: "application/json" },
+				body: JSON.stringify({
+					question,
+					answer: contentWithoutThink,
+					conversationId: requestConversationId,
+					messageId: requestMessageId,
+				}),
+			});
+			const data = await res.json();
+			if (!res.ok || data.error || !["ok", "success"].includes(data.status)) {
+				throw new Error(
+					typeof data.error === "string"
+						? data.error
+						: "Could not send your request. Please try again."
+				);
+			}
+			const feedback: StudentFeedback =
+				action === "report-hallucination"
+					? { hallucinationReported: true }
+					: {
+							canvasPosted: true,
+							...(typeof data.url === "string" && /^https?:\/\//i.test(data.url)
+								? { canvasUrl: data.url }
+								: {}),
+						};
+			submittedFeedback = {
+				conversationId: requestConversationId,
+				messageId: requestMessageId,
+				feedback: {
+					...(submittedFeedback?.conversationId === requestConversationId &&
+					submittedFeedback.messageId === requestMessageId
+						? submittedFeedback.feedback
+						: {}),
+					...feedback,
+				},
+			};
+			onfeedback?.({
+				conversationId: requestConversationId,
+				messageId: requestMessageId,
+				feedback,
+			});
+			if (action === "report-hallucination") {
+				feedbackStatus = "Hallucination reported for TA review.";
+			} else {
+				feedbackStatus = "Your question was posted to the Canvas course forum.";
+			}
+		} catch (err) {
+			chatError.set(
+				err instanceof Error ? err.message : "Could not send your request. Please try again."
+			);
+		} finally {
+			if (action === "report-hallucination") reporting = false;
+			else contacting = false;
+		}
+	}
 
 	function handleContentClick(e: MouseEvent) {
 		const target = e.target as HTMLElement;
@@ -300,8 +410,8 @@
 {#if message.from === "assistant"}
 	<div
 		bind:offsetWidth={messageWidth}
-		class="group relative -mb-4 flex w-fit max-w-full items-start justify-start gap-4 pb-4 leading-relaxed max-sm:mb-1 {message.routerMetadata &&
-		messageInfoWidth >= messageWidth
+		class="group relative -mb-4 flex w-fit max-w-full items-start justify-start gap-4 pb-4 leading-relaxed max-sm:mb-1 {messageInfoWidth >=
+		messageWidth
 			? 'mb-1'
 			: ''}"
 		data-message-id={message.id}
@@ -447,7 +557,7 @@
 
 		{#if message.routerMetadata || (!loading && fullContent)}
 			<div
-				class="absolute -bottom-3.5 {message.routerMetadata && messageInfoWidth > messageWidth
+				class="absolute -bottom-3.5 {messageInfoWidth > messageWidth
 					? 'left-1 pl-1 @2xl:pl-7'
 					: 'right-1'} flex max-w-[100cqw] items-center gap-0.5"
 				bind:offsetWidth={messageInfoWidth}
@@ -498,6 +608,38 @@
 					</div>
 				{/if}
 				{#if !isLast || !loading}
+					{#if isAuthor && !readOnly}
+						<button
+							class="btn shrink-0 rounded-xs px-2 py-1 text-xs text-gray-400 hover:text-gray-500 focus:ring-0 disabled:cursor-default dark:text-gray-400 dark:hover:text-gray-300"
+							title="Report hallucination"
+							aria-label="Report hallucination"
+							type="button"
+							disabled={reporting || reported || !conversationId || !question.trim()}
+							onclick={() => submitFeedback("report-hallucination")}
+						>
+							{reporting ? "Reporting…" : reported ? "Reported" : "Report hallucination"}
+						</button>
+						<button
+							class="btn shrink-0 rounded-xs px-2 py-1 text-xs text-gray-400 hover:text-gray-500 focus:ring-0 disabled:cursor-default dark:text-gray-400 dark:hover:text-gray-300"
+							title="Post this question to the Canvas course forum"
+							aria-label="Contact TA"
+							type="button"
+							disabled={contacting || contacted || !conversationId || !question.trim()}
+							onclick={() => submitFeedback("contact-ta")}
+						>
+							{contacting ? "Sending…" : contacted ? "Posted to Canvas" : "Contact TA"}
+						</button>
+						{#if canvasUrl}
+							<a
+								href={canvasUrl}
+								target="_blank"
+								rel="noopener noreferrer"
+								class="shrink-0 px-1 text-xs text-gray-500 underline dark:text-gray-300"
+								>View post</a
+							>
+						{/if}
+						<span class="sr-only" role="status">{feedbackStatus}</span>
+					{/if}
 					<CopyToClipBoardBtn
 						onClick={() => {
 							isCopied = true;

@@ -47,6 +47,7 @@ export const GET: RequestHandler = async ({ locals, params, url }) => {
 
 	return superjsonResponse({
 		messages: conversation.messages,
+		studentFeedback: "studentFeedback" in conversation ? conversation.studentFeedback : undefined,
 		title: conversation.title,
 		model: conversation.model,
 		preprompt: conversation.preprompt,

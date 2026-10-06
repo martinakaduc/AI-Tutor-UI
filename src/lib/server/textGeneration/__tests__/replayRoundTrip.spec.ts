@@ -363,6 +363,59 @@ async function setReasoningOverride(locals: App.Locals, value: boolean) {
 
 // ── The round trip ────────────────────────────────────────────────────────────
 
+describe.sequential("student feedback survives conversation writes", () => {
+	it("preserves a feedback completion concurrent with legacy migration and the next turn", async () => {
+		const { locals } = await createTestUser();
+		const questionId = crypto.randomUUID();
+		const replyId = crypto.randomUUID();
+		const canvasUrl = "https://canvas.example/courses/97040/discussion_topics/42";
+		const conv = await createTestConversation(locals, {
+			model: MODEL_ID,
+			title: "t",
+			messages: [
+				{ id: questionId, from: "user", content: "An earlier question" },
+				{ id: replyId, from: "assistant", content: "An earlier reply" },
+			],
+			studentFeedback: { [replyId]: { hallucinationReported: true } },
+		});
+		scriptRounds([{ content: "A new reply." }]);
+		const updateOne = collections.conversations.updateOne.bind(collections.conversations);
+		let injected = false;
+		const save = vi
+			.spyOn(collections.conversations, "updateOne")
+			.mockImplementation(async (filter, update, options) => {
+				if (!injected) {
+					injected = true;
+					// Complete Contact TA after the route read its migration snapshot.
+					await updateOne(
+						{ _id: conv._id },
+						{
+							$set: {
+								[`studentFeedback.${replyId}.canvasPosted`]: true,
+								[`studentFeedback.${replyId}.canvasUrl`]: canvasUrl,
+							},
+						}
+					);
+				}
+				return updateOne(filter, update, options);
+			});
+		try {
+			await sendMessage(conv, locals, "A follow-up question");
+		} finally {
+			save.mockRestore();
+		}
+		const stored = await reload(conv);
+		expect(injected).toBe(true);
+		expect(stored.rootMessageId).toBeTruthy();
+		expect(assistantMessages(stored).at(-1)?.content).toBe("A new reply.");
+		expect(stored.studentFeedback?.[replyId]).toEqual({
+			hallucinationReported: true,
+			canvasPosted: true,
+			canvasUrl,
+		});
+	});
+});
+
 describe.sequential("the generation log", () => {
 	it("records the turn's events, so a reattaching client has something to replay", async () => {
 		// The route builds the message and feeds the writer in the same closure. An

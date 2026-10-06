@@ -884,6 +884,8 @@
 	{pending}
 	{resuming}
 	messages={messagesPath as Message[]}
+	conversationId={data.id}
+	studentFeedback={data.studentFeedback}
 	{messagesAlternatives}
 	shared={data.shared}
 	preprompt={data.preprompt}

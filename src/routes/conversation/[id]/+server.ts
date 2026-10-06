@@ -72,12 +72,18 @@ export async function POST({ request, locals, params, getClientAddress }) {
 	});
 
 	if (conv && !conv.rootMessageId) {
+		const converted = convertLegacyConversation(conv);
 		const res = await collections.conversations.updateOne(
 			{
 				_id: convId,
 			},
 			{
-				$set: { ...conv, ...convertLegacyConversation(conv) },
+				// Only the tree changes during migration. A full snapshot would overwrite
+				// feedback statuses saved while this request was converting the messages.
+				$set: {
+					messages: converted.messages,
+					...(converted.rootMessageId ? { rootMessageId: converted.rootMessageId } : {}),
+				},
 			}
 		);
 

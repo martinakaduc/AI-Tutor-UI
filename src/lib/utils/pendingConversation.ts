@@ -3,11 +3,13 @@ import type { Message } from "$lib/types/Message";
 import type { DeployedSpace, MlBudget } from "$lib/types/Conversation";
 import type { PlanState } from "$lib/types/Plan";
 import type { TurnStateSnapshot } from "$lib/types/TurnState";
+import type { StudentFeedback } from "$lib/types/StudentFeedback";
 
 // Payload shape of GET /api/v2/conversations/[id] (post superjson-parse),
 // shared by the page load and the create-conversation seed.
 export interface ConversationData {
 	messages: Message[];
+	studentFeedback?: Record<string, StudentFeedback>;
 	title: string;
 	model: string;
 	preprompt?: string;
